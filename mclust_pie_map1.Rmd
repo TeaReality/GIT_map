@@ -1,0 +1,231 @@
+---
+title: "<i>Polyommatus coridon</i> -- Map"
+author: "Jonas and Martin :)"
+date: "25.05.2020"
+output:
+  html_document:
+    code_folding: hide
+  pdf_document: default
+  highlight: textmate
+theme: simplex
+editor_options:
+  chunk_output_type: console
+toc: yes
+toc_float: yes
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+	fig.path = "figures/",
+	dev = c("png", "pdf")
+)
+setwd("C:/R scripts/jonas_map/")
+```
+
+```{r preamble, results='hide', message=F, warning=F}
+library(tidyverse)
+# library(OpenStreetMap)
+# library(ggalt)
+library(maps)
+library(raster)
+library(ggplot2)
+library(readr)
+library(dplyr)
+
+library(geomorph)
+library(mixOmics)
+library(mclust)
+library(tibble)
+library(stringr)
+library(plyr)
+
+theme_set(theme_light())
+```
+
+
+# read and process data
+
+```{r read_data, message=F, warning=F}
+data <- read_tsv("map.tsv") 
+```
+
+
+#mclust and morphodata import
+
+```{r read_data, message=F, warning=F}
+
+
+mydata <- readland.tps("coridon.tps.TPS", specID = "ID")
+
+#select classifiers - cleanup done in notepad++
+#drop the first individual
+# unable to be read for some reason
+classifier <- read.csv("classifier.csv", header=T)
+classifier <- classifier[2:921,]
+geoweather <- read.csv("geoweather.csv", header = T)
+wing <- read.csv("wing.csv", header = T)
+# # forewing brown stripe only 1-14
+mydata <- mydata[19:35,,]
+
+# flip rotated specimens
+ii <- mydata[1,1,] > 2500
+x <- mydata[,,ii] 
+
+newx <- x[,1,] * (-1)
+x[,1,] <- newx
+mydata[,,ii] <- x
+
+# (GPA) generalized procrustes analysis
+q <- gpagen(mydata)
+
+# PCA on GPA
+pca <- gm.prcomp(q$coords)
+pcscores <- as.data.frame(pca$x)
+
+# selects first 6 PCs
+x.pca_six <- pcscores[,1:2]
+
+# mclust plot
+mod1 <- Mclust(x.pca_six)
+summary(mod1)
+pdf(file = "HW_clust.pdf")
+plot(mod1,  what = c("classification"))
+dev.off()
+summary(mod1)
+
+mod <- mod1$classification %>% enframe()
+
+sc_groupsLoc <- mod$name %>% 
+  str_extract(regex("^[A-Za-z]+.[A-Za-z]+")) %>% 
+  data.frame(Ident=., value=mod$value)  %>%
+  dplyr::group_by(.,Ident, value) %>% 
+  dplyr::summarise(n=n()) %>% 
+  set_names(c("Ident", "group", "n"))
+
+# revalue(sc_groupsLoc$Ident, c("DEGarch"="DEGaIs", "DEIsman"="DEGaIs")) -> sc_groupsLoc$Ident
+# revalue(sc_groupsLoc$Ident, c("DERegen"="DERKA", "DEKelhe"="DERKA", "DEAbens"="DERKA")) -> sc_groupsLoc$Ident
+# revalue(sc_groupsLoc$Ident, c("DEHochr"="DEHoRe", "DEReit"="DEHoRe")) -> sc_groupsLoc$Ident
+# revalue(sc_groupsLoc$Ident, c("DEW.uer"="DEReWu", "DERetzb"="DEReWu")) -> sc_groupsLoc$Ident
+
+fin_data  <-  sc_groupsLoc %>% 
+  dplyr::group_by(Ident) %>% 
+  dplyr::summarise(size=sqrt(sum(n))) %>% 
+  mutate_at(1, as.character) %>% 
+  left_join(data, by = "Ident")
+
+```
+
+# Maps
+
+Time to project the clusters on a map
+
+```{r mapsMap}
+ext <- extent(8,18,45,53)
+world_map <- map_data("world")
+elevation <- raster("C:/R scripts/jonas_map/malamapa.tif") %>%
+  crop(ext) %>%
+  as("SpatialPixelsDataFrame") %>%
+  as.data.frame %>% 
+  set_names(c("elevation", "x", "y"))
+
+p <- ggplot() +
+  coord_fixed(xlim = c(8,18), ylim = c(45,53), expand = F) +
+  geom_tile(data=elevation, aes(x=x, y=y, fill=elevation), alpha=0.8) +
+  geom_polygon(data=world_map, aes(x=long, y=lat, group=group),
+               fill=NA, colour="grey30") +
+  scale_fill_steps2(low = "white", mid = "white", high = "black",
+                    midpoint = 0,
+            # values = scales::rescale(c(-4971.797,0,3060.879)),
+            breaks = c(0,500,1000,1500)) +
+  labs(x="Longitude", y="Latidtude") +
+  theme_light() +
+  theme(panel.grid = element_blank())
+```
+
+
+
+Map with piecharts summarizing the morphometric group composition at localities.
+
+```{r pieMap}
+myColours <- c("red", "blue")
+
+xyLocs <- fin_data %>%
+  pivot_longer(Group1:Group2, names_to = "group", values_to = "n") %>% 
+  group_by(Ident) %>% 
+  dplyr::summarize(Lon = mean(XCoordinate), Lat = mean(YCoordinate), size=sqrt(sum(n)))
+
+# sc_groupsLoc <- data %>% 
+#   pivot_longer(Group1:Group2, names_to = "group", values_to = "n")
+
+pieList <-
+  lapply(1:length(xyLocs$Ident), function (i) {
+    gt_plot <- ggplotGrob(
+      ggplot(sc_groupsLoc %>% filter(Ident == xyLocs$Ident[i])) +
+        geom_bar(aes(x=Ident, y = as.numeric(n), fill = factor(group)),
+                 stat = "identity", colour="black") +
+        scale_fill_manual(values = myColours) +
+        coord_polar("y", start=0) +
+        theme_void() + theme(strip.text = element_blank(),
+                             legend.position = "none")
+    )
+    panel_coords <- gt_plot$layout[gt_plot$layout$name == "panel",]
+    gt_plot[panel_coords$t:panel_coords$b, panel_coords$l:panel_coords$r]
+  }
+  )
+
+xyLocsdf <- data.frame(Lon=xyLocs[[2]], Lat=xyLocs[[3]], size=xyLocs[[4]], row.names = xyLocs[[1]])
+
+s <-15
+for (i in 1:length(pieList)) {
+  p <- p + annotation_custom(pieList[[i]],
+                             xmin = xyLocsdf[i,"Lon"] - xyLocsdf[i,"size"]/s,
+                             xmax = xyLocsdf[i,"Lon"] + xyLocsdf[i,"size"]/s,
+                             ymin = xyLocsdf[i,"Lat"] - xyLocsdf[i,"size"]/s,
+                             ymax = xyLocsdf[i,"Lat"] + xyLocsdf[i,"size"]/s)
+}
+
+p
+
+# p +
+#   geom_encircle(aes(x = Longitude, y = Latitude, colour = cluster), data = mics_tab, s_shape=.8, expand=0.05, size = 2) +
+#   scale_colour_manual(values = popcol) +
+#   theme(legend.position = "none")
+
+# Use this to plot the pies alone
+# ggplot(sc_groupsLoc) +
+#   geom_bar(aes(x = 1, y = as.numeric(value), fill = name), stat = "identity") +
+#   coord_polar("y", start=0) +
+#   facet_wrap(facets = vars(locality)) +
+#   labs(fill = "snapclust\ncluster") +
+#   theme_void() + theme(strip.text = element_text(size = 7))
+```
+
+
+
+
+A group membership probability plot.
+```{r compoplot, eval=FALSE, fig.asp=.25, include=FALSE}
+# df <- structure_groups$x %>%
+#   as_tibble %>%
+#   left_join(structure_groups$cluster[,1:2], by = "Sample") %>% 
+#   rename("prior" = "cluster") %>% 
+#   pivot_longer(cols = starts_with("cl"), names_to = "group", values_to = "probability") %>%
+#   mutate(correct = prior==group) %>% 
+#   arrange(prior, correct, group, desc(probability)) %>% 
+#   mutate_at(vars(prior, group), function (x) gsub("^cl", "", x)) %>% 
+#   mutate_at(vars(prior, group, correct), function (x) factor(x, levels = unique(x), ordered = T))
+# rcts <- makeRectangles(pops[df$Sample %>% unique])
+# ggplot(df) +
+#   geom_col(aes(x = factor(Sample, levels = Sample %>% unique, ordered = T), y = probability, fill = group)) +
+#   labs(x = "sample", fill = "group") +
+#   geom_rect(data = rcts, aes(xmin=x1, xmax=x2, ymin=y1, ymax=y2, fill = factor(g))) +
+#   # scale_fill_brewer(palette = "Set1") +
+#   scale_fill_manual(values = popcol) +
+#   theme_linedraw() +
+#   theme(
+#     panel.grid = element_blank(),
+#     axis.text.x = element_blank(),
+#     axis.ticks.x = element_blank(),
+#     panel.border = element_blank()
+#   )
+```
